@@ -1,0 +1,57 @@
+stages:
+  - version
+  - build
+  - deploy
+
+version:
+  stage: version
+  image: registry.gitlab.com/juhani/go-semrel-gitlab:v0.20.4
+  script:
+    - echo "__version__ = '$(release next-version)'" > db_validations/_version.py
+    - release tag
+  artifacts:
+    paths:
+      - db_validations/_version.py
+  only:
+    refs:
+      - main
+  except:
+    - tags
+build-package:
+  stage: build
+  image: python:3.8
+  script:
+    - pip install twine
+    - python setup.py sdist bdist_wheel
+    - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token python -m twine upload --repository-url https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/pypi dist/*
+    - TWINE_PASSWORD=${PYPI_PASSWORD} TWINE_USERNAME=${PYPI_USERNAME} python -m twine upload dist/*
+  only:
+    refs:
+      - main
+
+deploy-workers:
+  stage: deploy
+  script:
+    - killall 'orlab-worker'
+    - screen -S worker -X stuff $'cd ~/worker\n'
+    - screen -S worker -X stuff $'conda activate worker\n'
+    - screen -S worker -X stuff $'pip install -r requirements.txt --upgrade --use-deprecated=legacy-resolver\n'
+    - screen -S worker -X stuff $'./run.sh\n'
+  parallel:
+    matrix:
+      - WORKER:
+          - worker01
+  tags:
+    - csm
+  only:
+    refs:
+      - main
+
+deploy-heroku:
+  stage: deploy
+  script:
+    - curl -n -X DELETE https://api.heroku.com/apps/${HEROKU_APP_ID}/build-cache -H "Content-Type:application/json" -H "Accept:application/vnd.heroku+json; version=3" -H "Authorization:Bearer ${HEROKU_API_KEY}"
+    - curl -n -X POST https://kolkrabbi.heroku.com/apps/${HEROKU_APP_ID}/github/push -d '{"branch":"master"}' -H "Authorization:Bearer ${HEROKU_API_KEY}"
+  only:
+    refs:
+      - main
